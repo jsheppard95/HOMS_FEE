@@ -1,0 +1,249 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="FB_Gantry" Id="{c1cb7916-5cba-4d97-8fa9-d6159e52ef7a}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_Gantry
+VAR_INPUT
+	xReset    : BOOL := FALSE; //Rising edge clears errors
+END_VAR
+VAR_OUTPUT
+	q_xError : BOOL;
+	q_xDone  : BOOL;
+END_VAR	
+VAR_IN_OUT
+	Gantry : HOMS_Gantry;
+END_VAR
+VAR
+	PAxis_Drive : FB_PTP;
+	SAxis_Drive : FB_PTP;
+	VAxis_Drive : FB_PTP;
+	GC_State	: E_GantryControl; //Gantry control state
+	fbGantryDiffVirtualLimitSwitch	:	FB_GantryDiffVirtualLimitSwitch;
+	// Edge detection for reset
+	rtReset   : R_TRIG;
+	// mcPower Enable for couple mode. Applies to both axes
+	CoupledModeEnable: BOOL := FALSE;
+	// mcPower Enable for decoupled mode. Applies to both axes
+	DecoupledModeEnable: BOOL := FALSE;
+	mpCouple	:	MC_GearIn;
+	msCouple    :   MC_GearIn;
+	mpDecouple	:	MC_GearOut;
+	msDecouple  :   MC_GearOut;
+	xGantryAlreadyCoupled: BOOL := FALSE;
+	fbGantryMonitor : FB_GantryDifferenceMonitor;
+	xFirstPass	:	BOOL := TRUE;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* Gantry Control
+Basic control of a HOMS Gantry
+
+This handles all controls of a HOMS Gantry. All requested moves, stops, and starts are done by requests
+to the HOMS_Gantry and lower level structures. There are two main modes of operation coupled and uncoupled,
+these are selected by toggling the xUncouple bit. The axis can be manually reset within with xReset input as well
+
+The Gantry does all of the setup for the FB_PTP for each individual drive, the Gantry Difference Monitor,
+and projecting the drive limit switches on to the Gantry.VAxis.
+*)
+
+//Triggers
+///////////////////////////
+rtReset(CLK:=xReset);
+
+//Gantry Difference Monitor
+///////////////////////////////
+fbGantryMonitor(Gantry:=Gantry);
+
+
+//Drive functions
+///////////////////////////////////
+PAxis_Drive(Stepper:=Gantry.PAxis);
+SAxis_Drive(Stepper:=Gantry.SAxis);
+
+
+//Sync Limit Summary with Hardware
+//////////////////////////////////
+Gantry.VAxis.xHiLS := Gantry.PAxis.xHiLS OR Gantry.SAxis.xHiLS;
+Gantry.VAxis.xLoLS := Gantry.PAxis.xLoLS OR Gantry.SAxis.xLoLS;
+
+//Request mode with binary input
+// * Is this too sloppy?
+///////////////////////////
+IF Gantry.xUncouple THEN
+	Gantry.ModeReq := GantryModeDeCoupled;
+ELSE
+	Gantry.ModeReq := GantryModeCoupled;
+END_IF
+
+//Axes enable logic
+//////////////////////////////////
+Gantry.PAxis.xEnable := (NOT Gantry.PAxis.i_xMotorInterlock) AND (Gantry.ModeReq = Gantry.Mode);
+Gantry.SAxis.xEnable := (NOT Gantry.SAxis.i_xMotorInterlock) AND (Gantry.ModeReq = Gantry.Mode);
+
+//Coupling Functoins
+////////////////////////////////
+mpCouple(Master :=Gantry.PAxis.stAxis,
+		  Slave :=Gantry.SAxis.stAxis,
+		  RatioNumerator := 1,
+		  RatioDenominator := 1,
+		  Acceleration := 0,
+		  Deceleration := 0,
+		  Jerk := 0);
+
+//De-coupling Functions
+/////////////////////////////////	  
+mpDecouple(Slave := Gantry.SAxis.stAxis);
+
+
+
+//Gantry Mode Request
+////////////////////////////////////
+//The gantry mode cannot change while anything is in motion
+	IF Gantry.PAxis.stAxis.Status.Moving OR Gantry.PAxis.stAxis.Status.Moving THEN
+		Gantry.ModeReq := Gantry.Mode;
+		// TODO : May want to add a warning here.
+	ELSIF Gantry.PAxis.stAxis.Status.NotMoving AND Gantry.SAxis.stAxis.Status.NotMoving THEN
+		//Change mode to requested if different
+		IF Gantry.Mode <> Gantry.ModeReq  OR xFirstPass THEN
+			Gantry.Mode := Gantry.ModeReq;
+			Gantry.PAxis.xEnable := FALSE;
+			Gantry.SAxis.xEnable := FALSE;
+			Gantry.VAxis.xEnable := FALSE;
+			GC_State := GCM_Init;
+		END_IF
+	END_IF
+	
+//Verify the direction of motion for each axis will not increase
+//gantry difference when uncoupled.
+IF Gantry.Mode = GantryModeDecoupled THEN
+	fbGantryDiffVirtualLimitSwitch.GantryDiff := Gantry.Diff;
+	fbGantryDiffVirtualLimitSwitch.GantryDiffFlt := Gantry.DiffFlt;
+	fbGantryDiffVirtualLimitSwitch(PAxis:=Gantry.PAxis, SAxis:=Gantry.SAxis);
+END_IF
+
+//Reinit
+/////////////////////////
+IF rtReset.Q THEN
+	GC_State := GCM_Init;
+END_IF
+
+/// Coupling StateMachine
+/////////////////////////////////
+CASE GC_State OF
+	GCM_Idle:
+		;
+	GCM_Init: 
+		//Initialize the axe
+		q_xError := FALSE;
+		//Axes are enabled by the VAxis if coupling
+		CoupledModeEnable := (Gantry.Mode = GantryModeCoupled);
+		//Gantry.VAxis.xEnable := Gantry.VAxis.i_xMotorInterlock;
+		
+		//Axis can be enabled independently in decoupled mode
+		DecoupledModeEnable := (Gantry.Mode = GantryModeDecoupled);
+		CASE Gantry.Mode OF
+			GantryModeCoupled:
+				GC_State := GCM_Couple;
+			GantryModeDecoupled:
+				GC_State := GCM_Decouple;
+		END_CASE
+
+	GCM_Couple:
+		//<HACK> I don't really like just checking if the axes are in a coupled state. I'd like a way to verify what other axis they are coupled to...
+		xGantryAlreadyCoupled := gantry.paxis.stAxis.NcToPlc.CoupleState=1 AND gantry.saxis.stAxis.NcToPlc.CoupleState = 3;
+		mpCouple.Execute := TRUE;
+		mpCouple.Execute R= mpCouple.Busy OR mpCouple.InGear OR mpCouple.Error OR mpCouple.CommandAborted OR xGantryAlreadyCoupled;
+		IF mpCouple.InGear OR xGantryAlreadyCoupled THEN
+			GC_State := GCM_Idle;
+		ELSIF mpCouple.Error THEN
+			GC_State := GCM_Error;
+		ELSIF mpCouple.CommandAborted THEN
+			GC_State := GCM_Error;
+		END_IF
+		
+	GCM_Decouple:
+		//Initiate a decoupling
+		mpDecouple.Execute := TRUE;
+		mpDecouple.Execute R= mpDecouple.Busy OR mpDecouple.Done OR mpDecouple.Error;
+		
+		IF mpDecouple.Done THEN
+			GC_State := GCM_Idle;
+		ELSIF mpDecouple.Error THEN
+			//TODO log an error
+			GC_State := GCM_Error;
+		END_IF
+
+	GCM_Error:
+		q_xError := TRUE;
+		GC_State := GCM_Idle;
+	
+END_CASE
+
+
+xFirstPass := FALSE;]]></ST>
+    </Implementation>
+    <LineIds Name="FB_Gantry">
+      <LineId Id="232" Count="0" />
+      <LineId Id="301" Count="2" />
+      <LineId Id="307" Count="0" />
+      <LineId Id="314" Count="1" />
+      <LineId Id="317" Count="0" />
+      <LineId Id="233" Count="0" />
+      <LineId Id="230" Count="1" />
+      <LineId Id="83" Count="0" />
+      <LineId Id="85" Count="0" />
+      <LineId Id="81" Count="0" />
+      <LineId Id="293" Count="3" />
+      <LineId Id="52" Count="0" />
+      <LineId Id="45" Count="1" />
+      <LineId Id="54" Count="0" />
+      <LineId Id="56" Count="0" />
+      <LineId Id="60" Count="0" />
+      <LineId Id="346" Count="0" />
+      <LineId Id="47" Count="0" />
+      <LineId Id="57" Count="2" />
+      <LineId Id="61" Count="0" />
+      <LineId Id="292" Count="0" />
+      <LineId Id="300" Count="0" />
+      <LineId Id="287" Count="2" />
+      <LineId Id="297" Count="1" />
+      <LineId Id="290" Count="0" />
+      <LineId Id="308" Count="0" />
+      <LineId Id="312" Count="0" />
+      <LineId Id="309" Count="2" />
+      <LineId Id="291" Count="0" />
+      <LineId Id="359" Count="0" />
+      <LineId Id="351" Count="2" />
+      <LineId Id="368" Count="3" />
+      <LineId Id="373" Count="0" />
+      <LineId Id="354" Count="0" />
+      <LineId Id="356" Count="0" />
+      <LineId Id="362" Count="0" />
+      <LineId Id="357" Count="1" />
+      <LineId Id="360" Count="1" />
+      <LineId Id="26" Count="15" />
+      <LineId Id="62" Count="0" />
+      <LineId Id="64" Count="0" />
+      <LineId Id="71" Count="0" />
+      <LineId Id="66" Count="4" />
+      <LineId Id="72" Count="0" />
+      <LineId Id="282" Count="1" />
+      <LineId Id="75" Count="2" />
+      <LineId Id="88" Count="0" />
+      <LineId Id="284" Count="0" />
+      <LineId Id="286" Count="0" />
+      <LineId Id="89" Count="4" />
+      <LineId Id="95" Count="13" />
+      <LineId Id="117" Count="0" />
+      <LineId Id="119" Count="10" />
+      <LineId Id="200" Count="0" />
+      <LineId Id="161" Count="1" />
+      <LineId Id="164" Count="1" />
+      <LineId Id="366" Count="0" />
+      <LineId Id="167" Count="6" />
+      <LineId Id="184" Count="0" />
+      <LineId Id="186" Count="3" />
+      <LineId Id="405" Count="2" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

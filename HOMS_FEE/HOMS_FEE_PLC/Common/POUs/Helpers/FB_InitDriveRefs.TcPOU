@@ -1,0 +1,31 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="FB_InitDriveRefs" Id="{8a2946f7-ef4a-4fae-8b10-a973882fee11}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_InitDriveRefs
+VAR_IN_OUT
+	stCoE	:	ST_ElmoGDCBellCoEParams;
+END_VAR
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[stCoE.stDriveRef.sNetId := F_CreateAmsNetId(gAmsNetIDEcatMaster1);
+stCoE.stDriveRef.nDriveNo := stCoE.stPlcDriveRef.nDriveNo;
+stCoE.stDriveRef.nDriveType := stCoE.stPlcDriveRef.nDriveType;
+stCoE.stDriveRef.nSlaveAddr := stCoE.stPlcDriveRef.nSlaveAddr;
+
+stCoE.AmsID := stCoE.stDriveRef.sNetId;
+stCoE.nSlave := stCoE.stDriveRef.nSlaveAddr;]]></ST>
+    </Implementation>
+    <LineIds Name="FB_InitDriveRefs">
+      <LineId Id="22" Count="2" />
+      <LineId Id="26" Count="2" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

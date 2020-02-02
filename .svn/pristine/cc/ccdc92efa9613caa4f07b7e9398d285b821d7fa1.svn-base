@@ -1,0 +1,348 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="FB_PitchControl_1" Id="{83305c7f-305a-4062-b369-6999e5a8462c}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'reflection'}
+FUNCTION_BLOCK FB_PitchControl_1
+VAR_IN_OUT
+	Pitch : HOMS_PitchMechanism;
+END_VAR
+VAR_INPUT
+	DirectPiezoMode	:	BOOL := FALSE; //Set this true to tell the piezo what position to seek in closed loop
+	rReqAbsPos	:	REAL; //Control the pitch position with this when DirectPiezoMode is false
+END_VAR
+VAR_OUTPUT
+	q_xError	:	BOOL;
+	q_xDone	:	BOOL;
+END_VAR
+VAR
+	//Introspection
+	//////////////////////////////
+		{attribute 'instance-path'}
+		{attribute 'no_init'}
+		POUName	:	STRING; //Name of the POU for logging/error reporting
+	
+	
+	//FB Boilerplate
+	//////////////////////
+		stDiag	:	ST_fbDiagnostics;
+		fbFormatString	:	FB_FormatString;
+		
+	//Working variables
+	/////////////////////////
+		PC_State 		:	E_PitchControl := PCM_Init;
+		rPrevReqAbsPos	:	REAL; //Previously  requested abs position
+		rPrevStepperPos :	REAL; //Previously successfully achieved stepper position
+		tonStepperHold	:	TON := (PT := T#100MS); //Timer to hold stepper position while the system relaxes
+		FirstPass	:	BOOL := TRUE; //set false after first pass, used for initializations
+		Coarse50PiezoMove	:	BOOL;
+		rSettledRange	:	REAL := 0.0003;
+		OriginalPosRequest: REAL;
+		//PTP
+		/////////////////////////
+				Drive         : FB_DRIVE;
+				fbCoE         : FB_ElmoGDCBellCoE;
+				nCommand      : UINT;
+				rLastSetpoint : REAL;
+				rtTweakFwd    : R_TRIG;
+				rtTweakBwd    : R_TRIG;
+				rtExecute     : R_TRIG;
+				bRequesting   : BOOL;
+				rSetpoint     : REAL; //Adjusted based on abs pos request or tweaks.
+	
+	//Axis Control Blocks
+	/////////////////////////////
+		fbPiezoControl	:	FB_PiezoControl;
+		fbPitchStepper   :   FB_PTP;
+	
+	
+	//Triggers
+	//////////////////////////////
+		rtManualMode:	R_TRIG;
+		ftManualMode	:	F_TRIG;
+		rtStepperDone	:	R_TRIG;
+
+	lrActPos: LREAL;
+	tonPiezoSettled	: TON := (PT:=T#2S);
+	
+	ftLimitSwitch: F_TRIG;
+	// Flag to track when a limit switch has been hit.
+	xLimitHit: BOOL;
+END_VAR
+VAR CONSTANT
+	cPiezoRange	:	REAL := 0.09; //90um of stroke to the piezo
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* HOMS Pitch Control
+A. Wallace
+
+The HOMS Pitch mechanism consists of a stepper and piezo that work together to adjust
+the pitch of the mirror assembly.
+
+Pitch control state machine
+
+If the target position is beyond the range of the piezo mechanism,
+execute a coarse pitch move with the stepper. 
+The target of the coarse move shall be set to the requested position. 
+Once coarse motion has completed the coarse motion drive position 
+correction output shall be set to zero.
+
+Fine pitch motion with the piezo will be initiated to finish closing the loop.
+
+The piezo mechanism can actuate ~ 180urad or 90um.
+
+*)
+
+lrActPos := Pitch.Stepper.stAxis.NcToPlc.ActPos;
+nCommand  := 3;
+(* If we hit a limit during a move, we need to change the setpoint *)
+ftLimitSwitch(CLK:=Pitch.Stepper.xHiLS AND Pitch.Stepper.xLoLS);
+
+//Manual mode switching logic
+/////////////////////////////////////
+	rtManualMode(CLK:=DirectPiezoMode);
+	ftManualMode(CLK:=DirectPiezoMode);
+	A_ModeSwitch();
+
+//Motion control logic from PTP	
+//Tweak Triggers
+/////////////////////////////////////////////
+	rtTweakFwd(CLK:=Pitch.Axis.bTwkFwd);
+	rtTweakBwd(CLK:=Pitch.Axis.bTwkBwd);
+	rtExecute(CLK:=NOT Pitch.Stepper.stAxis.Status.NotMoving);
+//Tweak Forward
+/////////////////////
+IF rtTweakFwd.Q THEN
+	//Setup move
+	Pitch.Axis.rReqAbsPos := rLastSetpoint + Pitch.Axis.rTweak;
+//Tweak Backwards
+/////////////////////
+ELSIF rtTweakBwd.Q THEN
+	//Setup move
+	Pitch.Axis.rReqAbsPos := rLastSetpoint - Pitch.Axis.rTweak;
+//Setpoint change
+///////////////////////
+(*
+ELSIF Pitch.Axis.rReqAbsPos <> rPrevReqAbsPos THEN //AND NOT Drive.bBusy THEN
+	//Setup move
+	rSetpoint := LREAL_TO_REAL(Pitch.Axis.rReqAbsPos);
+	rPrevReqAbsPos := rSetpoint;
+*)
+ELSE
+	bRequesting := FALSE;
+END_IF
+
+(* At this point, Pitch.Axis.rReqAbsPos holds the next setpoint.
+Now it will be validated against the soft-limits
+*)
+
+//State Machine
+//////////////////////////////////
+CASE PC_State OF
+	PCM_Init: 
+		//Initialize stepper motor mc power block
+		Drive.bReset := FirstPass;
+		PC_State := PCM_Standby;
+	PCM_Standby:
+		(* In standby, the piezo 
+		*)
+		IF (rLastSetpoint <> Pitch.Axis.rReqAbsPos) THEN
+			//We don't want to initiate any kind of a move if we don't have to.
+			IF 	Pitch.Axis.rReqAbsPos > Pitch.ReqPosLimHi OR Pitch.Axis.rReqAbsPos < Pitch.ReqPosLimLo THEN
+				//Requested move is outside of travel limits
+				OriginalPosRequest	:= Pitch.Axis.rReqAbsPos;
+				Pitch.Axis.rReqAbsPos := LIMIT(Pitch.ReqPosLimLo, Pitch.Axis.rReqAbsPos, Pitch.ReqPosLimHi);
+				//Only want to log one warning about a bad position request.
+				IF OriginalPosRequest <> Pitch.Axis.rReqAbsPos THEN
+					//Log a warning
+					fbFormatString.sFormat := 'Pitch req OoR fb (%s), reset within limits, %f';
+					fbFormatString.arg1 := F_STRING(POUName);
+					fbFormatString.arg2 := F_REAL(OriginalPosRequest);
+					//fbFormatString(sOut=>fbLogMessage.i_sMsg);
+					fbFormatString(sOut=>stDiag.asResults[stDiag.resultIdx.IncVal()]);
+					//fbLogMessage(i_eSevr:= Warning, i_eSubsystem:=gDefaultSubsystem);
+				END_IF
+			END_IF
+			// At this point Pitch.Axis.rReqAbsPos is considered clean and safe, so we pass to a holding variable
+			rSetpoint := Pitch.Axis.rReqAbsPos;
+			//New position request, no longer done.
+			q_xDone := FALSE;
+			PC_State := PCM_MoveRequested;
+		END_IF
+	PCM_MoveRequested: 
+		//A move has been requested, is it within range of the piezo?
+		IF WithinRange(ValA:=rSetpoint, Center:=rPrevStepperPos, Range:=cPiezoRange, Offset:=0) THEN
+			//Move is within the nominal range of the piezo
+			fbFormatString.sFormat := 'Within range, fine move %f';
+			fbFormatString.arg1 := F_REAL(rSetpoint);
+			fbFormatString(sOut=>stDiag.asResults[stDiag.resultIdx.IncVal()]);
+			PC_State := PCM_FineMove;
+		ELSE
+			// Out of range, head to coarse move
+			fbFormatString.sFormat := 'OoR, using stepper %f';
+			fbFormatString.arg1 := F_REAL(rSetpoint);
+			fbFormatString(sOut=>stDiag.asResults[stDiag.resultIdx.IncVal()]);
+			PC_State := PCM_Coarse50Piezo;
+		END_IF
+	PCM_Coarse50Piezo:
+		//A coarse move uses the stepper to do a best-effort position
+		//First set the piezo to nominal 50% extension using idle mode
+		//////////////////////////////////////////////////////////////////////////////
+		Pitch.Piezo.xIdleMode := TRUE;
+		//Indicate we are doing the coarse 50% piezo move	
+		Coarse50PiezoMove := TRUE;
+		//Wait for piezo to settle
+		tonPiezoSettled.IN := TRUE;
+		Coarse50PiezoMove R= tonPiezoSettled.Q;
+		IF tonPiezoSettled.Q THEN
+			//Piezo has moved to 50% position, finish with the stepper
+			PC_State := PCM_CoarseMove;
+			Pitch.Stepper.xEnable := TRUE;
+			tonPiezoSettled.IN := FALSE;
+		END_IF
+	PCM_CoarseMove: 
+		//With the piezo at a nom 50% extension, move the stepper to requested position
+		IF Drive.bEnabled THEN
+			Drive.fPosition := rSetpoint;
+			Drive.bExecute := TRUE;
+		END_IF
+
+		IF ftLimitSwitch.Q THEN
+			Drive.fPosition := lrActPos;
+			xLimitHit	:= TRUE; //set this flag here.
+		END_IF
+		tonStepperHold.IN := WithinRange(ValA:=LREAL_TO_REAL(lrActPos), Center:=rSetpoint, Range:=rSettledRange, Offset:=0);
+		tonStepperHold(); //call this here to reset Q just below on first cycle
+		//If the coarse move is complete, finish position correction with the piezo
+		IF tonStepperHold.Q  OR ftLimitSwitch.Q THEN
+			PC_State := PCM_CoarseMoveCleanup;
+			rPrevStepperPos := Drive.fPosition;
+		ELSIF Pitch.Stepper.stStatus.bError OR Drive.bError THEN
+			Drive.bExecute := FALSE;
+			Pitch.Stepper.xEnable := FALSE;
+			PC_State := PCM_StepperError;
+			//Stepper fb has encountered an error, pass a message to the logger
+			fbFormatString.sFormat := 'Coarse stepper move error, error id %d';
+			fbFormatString.arg1 := F_UDINT(Drive.nErrorId);
+			fbFormatString(sOut=>stDiag.asResults[stDiag.resultIdx.IncVal()]);
+			
+		END_IF
+	PCM_CoarseMoveCleanup:
+		Drive.bExecute := FALSE;
+		Pitch.Stepper.xEnable := FALSE;
+		IF xLimitHit THEN
+			PC_State := PCM_Done;
+		ELSE
+			PC_State := PCM_FineMove;
+		END_IF
+	PCM_FineMove:	
+		Pitch.Piezo.xIdleMode := FALSE;
+		Pitch.Piezo.rReqAbsPos := Pitch.Axis.rReqAbsPos;
+		PC_State := PCM_Done;
+	PCM_Done:
+		//Set the previously requested position here
+		rLastSetpoint := rSetpoint;
+		Pitch.Axis.rReqAbsPos := rLastSetpoint;
+		xLimitHit := FALSE;
+		//Indicate we're done
+		q_xDone	:= TRUE;
+		//Move back to standby
+		PC_State := PCM_Standby;
+	PCM_StepperError:
+		Drive.bReset := TRUE; // set false again in PCM_Init
+		PC_State := PCM_Init; 
+	PCM_PiezoError:
+		PC_State := PCM_Init;
+	PCM_OtherError:
+		PC_State := PCM_Init;
+	
+END_CASE
+
+FirstPass := FALSE;
+
+//Transfer the other stuff to the piezo
+/////////////////////////////////////////
+Pitch.Piezo.rActPos := lrActPos;
+
+//Function blocks
+ACT_PTP();
+
+tonPiezoSettled();
+tonStepperHold();
+
+fbPiezoControl(iq_Piezo:=Pitch.Piezo,
+	Enable_Positive:=Pitch.Stepper.xHiLS,
+	Enable_Negative:=Pitch.Stepper.xLoLS
+);
+]]></ST>
+    </Implementation>
+    <Action Name="A_ModeSwitch" Id="{f72961ab-d7e7-4c45-bd5d-d7e3b3746321}">
+      <Implementation>
+        <ST><![CDATA[(* When switching between modes, we need to make sure all the executes/ mode switches, etc. are cleared *)
+
+// Automatic to manual
+/////////////////////////////
+IF rtManualMode.Q THEN
+;
+END_IF
+
+// Manual to automatic
+//////////////////////////////
+IF ftManualMode.Q THEN
+	;
+END_IF]]></ST>
+      </Implementation>
+    </Action>
+    <Action Name="ACT_PTP" Id="{e9300516-494e-472b-b7c9-c8cd416a1619}">
+      <Implementation>
+        <ST><![CDATA[//Read CoE Parameters
+/////////////////////////
+fbCoE(stCoE:=Pitch.Stepper.stCoE);
+
+//Give control of the axis to the Drive function block
+///////////////////////////////////////////////////////
+Drive(bEnable  := Pitch.Stepper.xEnable,
+	  Axis     := Pitch.Stepper.stAxis,
+	  nCommand := nCommand,
+	  fAcceleration := Pitch.Stepper.fAcceleration,
+	  fDeceleration := Pitch.Stepper.fDeceleration,
+	  fVelocity     := Pitch.Stepper.fVelocity,
+	  bLimitFwd     := Pitch.Stepper.xHiLS,
+	  bLimitBwd     := Pitch.Stepper.xLoLS,
+	  bDone	=>  Pitch.Stepper.bDone,
+	  bBusy => Pitch.Stepper.bBusy,
+	  stStepperStatus => Pitch.Stepper.stStatus
+	  );
+
+//Reset Execute to wait for next motion command
+////////////////////////////////////////////////
+//bExecute R= Drive.Status.NotMoving AND NOT bRequesting;
+
+
+
+]]></ST>
+      </Implementation>
+    </Action>
+    <LineIds Name="FB_PitchControl_1">
+      <LineId Id="1951" Count="200" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_PitchControl_1.A_ModeSwitch">
+      <LineId Id="2" Count="3" />
+      <LineId Id="9" Count="1" />
+      <LineId Id="8" Count="0" />
+      <LineId Id="6" Count="1" />
+      <LineId Id="11" Count="2" />
+      <LineId Id="1" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_PitchControl_1.ACT_PTP">
+      <LineId Id="2" Count="7" />
+      <LineId Id="12" Count="4" />
+      <LineId Id="30" Count="0" />
+      <LineId Id="32" Count="1" />
+      <LineId Id="17" Count="6" />
+      <LineId Id="25" Count="0" />
+      <LineId Id="27" Count="0" />
+      <LineId Id="1" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,187 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="FB_PTP" Id="{e028eb03-5e9f-4b8a-82ad-618bdc40c7f0}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_PTP
+VAR_IN_OUT
+	Stepper   : ST_HOMSStepper;
+END_VAR
+VAR
+	Drive         : FB_DRIVE;
+	fbCoE         : FB_ElmoGDCBellCoE;
+	nCommand      : UINT;
+	bExecute      : BOOL;
+	
+	rLastSetpoint : REAL;
+	rtTweakFwd    : R_TRIG;
+	rtTweakBwd    : R_TRIG;
+	rtExecute     : R_TRIG;
+	bRequesting   : BOOL;
+END_VAR
+VAR_OUTPUT
+	rSetpoint     : REAL;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* Point to Point
+T. Rendahl 17-5-05
+
+Provides a conveinent wrapper for EPICS to instruct Point to Point motion of 
+an axis. The function block supplies support for three basic kinds of motion,
+absolute, tweak forward and tweak backwards. The ladder has a single reference
+for distance to move, however the actual motion is triggered by a rising edge on
+either bTwkFwd, or bTwkBwd. Absolute positioning works differently in order to
+mimic the way EPICS motor record. In this case, simply changing the rAbsolute 
+setpoint will start the motion
+
+The management of setpoint, velocity, and the general control of the Axis are
+derived HomsStepper DUT. This allows for easy mapping of status variables to 
+EPICS modbus maps.
+
+TODO
+****
+Pause : The drive will Halt if we change bExecute to False
+Stop  : Not included in FB_Drive, similar to Pause except
+		requires explicit clearing before moving again 
+*)
+//Read CoE Parameters
+/////////////////////////
+fbCoE(stCoE:=Stepper.stCoE);
+
+//Tweak Triggers
+/////////////////////////////////////////////
+rtTweakFwd(CLK:=Stepper.bTwkFwd);
+rtTweakBwd(CLK:=Stepper.bTwkBwd);
+rtExecute(CLK:=NOT Stepper.stAxis.Status.NotMoving);
+
+
+//Tweak Forward
+/////////////////////
+IF rtTweakFwd.Q THEN
+	//Setup move
+	nCommand  := 2;
+	rSetpoint := Stepper.rTweak;
+	//Execute
+	bExecute := TRUE;
+	bRequesting := TRUE;	
+//Tweak Backwards
+/////////////////////
+ELSIF rtTweakBwd.Q THEN
+	//Setup move
+	nCommand  := 2;
+	rSetpoint := -Stepper.rTweak;
+	//Execute
+	bExecute := TRUE;
+	bRequesting := TRUE;
+
+//Setpoint change
+///////////////////////
+ELSIF Stepper.rReqAbsolute <> rLastSetpoint THEN //AND NOT Drive.bBusy THEN
+	//Setup move
+	rSetpoint := LREAL_TO_REAL(Stepper.rReqAbsolute);
+	nCommand  := 3;
+	//Execute
+	bExecute := TRUE;
+	bRequesting := TRUE;
+	//Store last request so we don't repeat
+	rLastSetpoint := Stepper.rReqAbsolute;
+
+ELSE
+	bRequesting := FALSE;
+END_IF
+//Give control of the axis to the Drive function block
+///////////////////////////////////////////////////////
+Drive(bEnable  := Stepper.xEnable,
+	  Axis     := Stepper.stAxis,
+	  nCommand := nCommand,
+	  bExecute := bExecute,
+	  fPosition     := rSetpoint,
+	  fAcceleration := Stepper.fAcceleration,
+	  fDeceleration := Stepper.fDeceleration,
+	  fVelocity     := Stepper.fVelocity,
+	  bLimitFwd     := Stepper.xHiLS,
+	  bLimitBwd     := Stepper.xLoLS,  
+	  );
+
+//Reset Execute to wait for next motion command
+////////////////////////////////////////////////
+bExecute R= Drive.Status.NotMoving AND NOT bRequesting;
+
+//Link the output of the Drive back to the struct
+Stepper.stStatus := Drive.stStepperStatus;
+//Explicit output of busy
+Stepper.bBusy := Drive.bBusy;
+//Gather done flag because it is not storted in status
+Stepper.bDone := Drive.bDone;
+
+	  
+	  
+	  ]]></ST>
+    </Implementation>
+    <LineIds Name="FB_PTP">
+      <LineId Id="19" Count="0" />
+      <LineId Id="21" Count="1" />
+      <LineId Id="123" Count="0" />
+      <LineId Id="125" Count="1" />
+      <LineId Id="128" Count="0" />
+      <LineId Id="131" Count="3" />
+      <LineId Id="205" Count="0" />
+      <LineId Id="136" Count="0" />
+      <LineId Id="206" Count="0" />
+      <LineId Id="149" Count="4" />
+      <LineId Id="124" Count="0" />
+      <LineId Id="79" Count="0" />
+      <LineId Id="332" Count="1" />
+      <LineId Id="54" Count="0" />
+      <LineId Id="80" Count="0" />
+      <LineId Id="86" Count="1" />
+      <LineId Id="89" Count="0" />
+      <LineId Id="88" Count="0" />
+      <LineId Id="259" Count="0" />
+      <LineId Id="278" Count="0" />
+      <LineId Id="72" Count="1" />
+      <LineId Id="90" Count="0" />
+      <LineId Id="121" Count="0" />
+      <LineId Id="91" Count="0" />
+      <LineId Id="93" Count="0" />
+      <LineId Id="122" Count="0" />
+      <LineId Id="95" Count="0" />
+      <LineId Id="94" Count="0" />
+      <LineId Id="74" Count="0" />
+      <LineId Id="96" Count="0" />
+      <LineId Id="98" Count="0" />
+      <LineId Id="119" Count="0" />
+      <LineId Id="99" Count="1" />
+      <LineId Id="120" Count="0" />
+      <LineId Id="101" Count="0" />
+      <LineId Id="309" Count="0" />
+      <LineId Id="76" Count="1" />
+      <LineId Id="68" Count="0" />
+      <LineId Id="104" Count="0" />
+      <LineId Id="116" Count="0" />
+      <LineId Id="105" Count="1" />
+      <LineId Id="117" Count="0" />
+      <LineId Id="108" Count="0" />
+      <LineId Id="118" Count="0" />
+      <LineId Id="310" Count="0" />
+      <LineId Id="114" Count="1" />
+      <LineId Id="311" Count="1" />
+      <LineId Id="241" Count="0" />
+      <LineId Id="197" Count="0" />
+      <LineId Id="182" Count="1" />
+      <LineId Id="186" Count="9" />
+      <LineId Id="109" Count="1" />
+      <LineId Id="181" Count="0" />
+      <LineId Id="279" Count="0" />
+      <LineId Id="260" Count="0" />
+      <LineId Id="59" Count="1" />
+      <LineId Id="201" Count="0" />
+      <LineId Id="199" Count="0" />
+      <LineId Id="66" Count="0" />
+      <LineId Id="65" Count="0" />
+      <LineId Id="63" Count="0" />
+      <LineId Id="52" Count="1" />
+      <LineId Id="30" Count="0" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <DUT Name="E_GantryControl" Id="{7f1863d3-887e-436c-a9b3-0ad5dd994aac}">
+    <Declaration><![CDATA[TYPE E_GantryControl :
+(
+	//Gantry Control Machine
+	GCM_Idle := 0,
+	GCM_Init := 10,
+	GCM_Couple := 50,
+	GCM_CoupledEnable := 51,
+	GCM_CoupledStandby := 100,
+	GCM_Decouple := 500,
+	GCM_DecoupledStandby := 1000,
+	GCM_CoupledMoveDone	:= 8000,
+	GCM_Error	:= 9000
+);
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

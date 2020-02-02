@@ -1,0 +1,602 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="FB_PiezoControl" Id="{5392e1ba-2dcb-4ebf-997e-d8ca885584ee}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_PiezoControl
+VAR_IN_OUT
+	iq_Piezo	:	ST_PiezoAxis;
+END_VAR
+VAR_INPUT
+	xExecute	:	BOOL; //Rising edge being piezo motion
+	xReset      :   BOOL;
+	Enable_Positive : BOOL; //Reverse of Positive Limit Switch
+	Enable_Negative : BOOL; //Reverse of Negative Limit Switch
+	
+END_VAR
+VAR_OUTPUT
+	xBusy	:	BOOL; //Busy remains true while piezo position is being adjusted
+	xDone	:	BOOL; //Reached target position
+	xError	:	BOOL; //General error
+END_VAR
+VAR
+	E_State     : E_PiezoControl; //ENUM for Piezo Control State
+	rtStartMove : R_TRIG; //Rising Trigger for Execution
+	rtReset     : R_TRIG; //Rising Trigger for Error reset
+	rSetpoint   : REAL;   //Internal Storage of Setpoint
+	rReqVoltage	:	REAL; //requested voltage
+	rLLSV: REAL := -10;
+	rHLSV: REAL := 120;
+	fbPI: FB_CTRL_PI;
+	fbRamp: FB_CTRL_RAMP_GENERATOR_EXT;
+	// FB initialized flag
+	bInitialized: BOOL;
+	//Get cycle time for control FBs
+	fbGetCycleTime	:	FB_CTRL_GET_TASK_CYCLETIME;
+	tTaskCycleTime: TIME;
+	bCycleTimeValid: BOOL;
+	rtVoltMode: R_TRIG;
+	fOut: LREAL;
+	fPiezoBias: LREAL := 60;
+	fScale: REAL := -60;
+END_VAR
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* FB Piezo Control
+
+//TODO
+*)
+
+
+//Triggers
+///////////////////////////////
+	rtStartMove(CLK:=xExecute);
+	rtReset(CLK:=iq_Piezo.xEnable);
+	rtVoltMode(CLK:=iq_Piezo.xVoltageMode);
+	
+//Keep requested voltage to within limits
+iq_Piezo.rReqVoltage := LIMIT(iq_Piezo.LowerVoltage, iq_Piezo.rReqVoltage, iq_Piezo.UpperVoltage);
+
+//Don't do anything until we're ready
+IF bInitialized THEN
+
+ACT_Controller();
+
+IF iq_Piezo.xVoltageMode THEN
+	//Set PI block to idle
+	fbPI.eMode := eCTRL_MODE_PASSIVE;
+	rReqVoltage := iq_Piezo.rReqVoltage; //TODO add a ramp
+ELSE
+	IF iq_Piezo.xIdleMode THEN
+		rReqVoltage := fScale * 0 + fPiezoBias;
+	ELSE
+		//Fout is connected to the piezo voltage control
+		rReqVoltage := fScale * fbPI.fOut + fPiezoBias;
+	END_IF		
+	//Control mode is always active, so compensation takes over more smoothly
+	fbPI.eMode := eCTRL_MODE_ACTIVE;
+END_IF
+
+
+
+
+
+
+
+//Limits
+//I can think of a way to beat this...
+IF NOT Enable_Positive THEN
+	rHLSV := iq_Piezo.rSetVoltage;
+ELSIF NOT Enable_Negative THEN
+	rLLSV := iq_Piezo.rSetVoltage;
+ELSE
+	rHLSV := iq_Piezo.UpperVoltage;
+	rLLSV := iq_Piezo.LowerVoltage;
+END_IF
+
+iq_Piezo.rSetVoltage := LIMIT(rLLSV, rReqVoltage, rHLSV);
+
+ELSE
+	fbGetCycleTime( eMode   := eCTRL_MODE_ACTIVE,
+                tTaskCycleTime => tTaskCycleTime,
+                bCycleTimeValid => bCycleTimeValid);
+	IF bCycleTimeValid THEN
+		iq_Piezo.stPIParams.tTaskCycleTime := tTaskCycleTime;
+		iq_Piezo.stPIParams.tCtrlCycleTime := tTaskCycleTime;
+		bInitialized	:= TRUE;
+	END_IF
+	
+END_IF
+
+xBusy S= fbGetCycleTime.bError;]]></ST>
+    </Implementation>
+    <Action Name="ACT_CheckLimits" Id="{ac675dbf-d018-4e50-bca8-f98ca804bbef}">
+      <Implementation>
+        <ST><![CDATA[]]></ST>
+      </Implementation>
+    </Action>
+    <Action Name="ACT_Controller" Id="{00f90f5a-58c3-4ffb-935c-94819ab21a7d}">
+      <Implementation>
+        <NWL>
+          <XmlArchive>
+            <Data>
+              <o xml:space="preserve" t="NWLImplementationObject">
+                <v n="NetworkListComment">""</v>
+                <v n="DefaultViewMode">"Fbd"</v>
+                <l2 n="NetworkList" cet="Network">
+                  <o>
+                    <v n="ILActive">false</v>
+                    <v n="FBDValid">false</v>
+                    <v n="ILValid">false</v>
+                    <l2 n="ILLines" />
+                    <v n="Comment">""</v>
+                    <v n="Title">""</v>
+                    <v n="Label">""</v>
+                    <v n="OutCommented">false</v>
+                    <l2 n="NetworkItems" cet="BoxTreeAssign">
+                      <o>
+                        <o n="OutputItems" t="OutputItemList">
+                          <l2 n="OutputItems" cet="Operand">
+                            <o>
+                              <v n="Operand">"fOut"</v>
+                              <v n="Type">"LREAL"</v>
+                              <v n="Comment">""</v>
+                              <v n="SymbolComment">""</v>
+                              <v n="Address">""</v>
+                              <o n="Flags" t="Flags">
+                                <v n="Extensible">false</v>
+                                <v n="Flags">0</v>
+                                <v n="Fixed">false</v>
+                              </o>
+                              <v n="LValue">true</v>
+                              <v n="Boolean">false</v>
+                              <v n="IsInstance">false</v>
+                              <v n="Id">53L</v>
+                            </o>
+                          </l2>
+                        </o>
+                        <o n="Flags" t="Flags">
+                          <v n="Extensible">false</v>
+                          <v n="Flags">0</v>
+                          <v n="Fixed">false</v>
+                        </o>
+                        <o n="RValue" t="BoxTreeBox">
+                          <v n="ContainsExtensibleInputs">false</v>
+                          <v n="ProvidesSTSnippet">false</v>
+                          <v n="BoxType">"FB_CTRL_PI"</v>
+                          <o n="Instance" t="Operand">
+                            <v n="Operand">"fbPI"</v>
+                            <v n="Type">"FB_CTRL_PI"</v>
+                            <v n="Comment">""</v>
+                            <v n="SymbolComment">""</v>
+                            <v n="Address">""</v>
+                            <o n="Flags" t="Flags">
+                              <v n="Extensible">false</v>
+                              <v n="Flags">0</v>
+                              <v n="Fixed">false</v>
+                            </o>
+                            <v n="LValue">false</v>
+                            <v n="Boolean">false</v>
+                            <v n="IsInstance">true</v>
+                            <v n="Id">2L</v>
+                          </o>
+                          <o n="OutputItems" t="OutputItemList">
+                            <l2 n="OutputItems" cet="Operand">
+                              <n />
+                              <o>
+                                <v n="Operand">""</v>
+                                <v n="Type">"BOOL"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">true</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">4L</v>
+                              </o>
+                              <o>
+                                <v n="Operand">""</v>
+                                <v n="Type">"E_CTRL_STATE"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">true</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">5L</v>
+                              </o>
+                              <o>
+                                <v n="Operand">""</v>
+                                <v n="Type">"E_CTRL_ERRORCODES"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">true</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">6L</v>
+                              </o>
+                              <o>
+                                <v n="Operand">""</v>
+                                <v n="Type">"BOOL"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">true</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">7L</v>
+                              </o>
+                            </l2>
+                          </o>
+                          <o n="Flags" t="Flags">
+                            <v n="Extensible">false</v>
+                            <v n="Flags">0</v>
+                            <v n="Fixed">false</v>
+                          </o>
+                          <n n="InputFlags" />
+                          <l2 n="InputItems">
+                            <o t="BoxTreeOperand">
+                              <o n="Operand" t="Operand">
+                                <v n="Operand">"iq_Piezo.rReqAbsPos"</v>
+                                <v n="Type">"LREAL"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">false</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">9L</v>
+                              </o>
+                              <v n="Id">8L</v>
+                            </o>
+                            <o t="BoxTreeOperand">
+                              <o n="Operand" t="Operand">
+                                <v n="Operand">"iq_Piezo.rActPos"</v>
+                                <v n="Type">"LREAL"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">false</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">11L</v>
+                              </o>
+                              <v n="Id">10L</v>
+                            </o>
+                            <o t="BoxTreeOperand">
+                              <o n="Operand" t="Operand">
+                                <v n="Operand">"0"</v>
+                                <v n="Type">"INT"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">false</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">13L</v>
+                              </o>
+                              <v n="Id">12L</v>
+                            </o>
+                            <o t="BoxTreeBox">
+                              <v n="ContainsExtensibleInputs">false</v>
+                              <v n="ProvidesSTSnippet">false</v>
+                              <v n="BoxType">"OR"</v>
+                              <o n="Instance" t="Operand">
+                                <n n="Operand" />
+                                <v n="Type">""</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">false</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">true</v>
+                                <v n="Id">55L</v>
+                              </o>
+                              <o n="OutputItems" t="OutputItemList">
+                                <l2 n="OutputItems">
+                                  <n />
+                                </l2>
+                              </o>
+                              <o n="Flags" t="Flags">
+                                <v n="Extensible">false</v>
+                                <v n="Flags">0</v>
+                                <v n="Fixed">false</v>
+                              </o>
+                              <l2 n="InputFlags" cet="Flags">
+                                <o>
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">1</v>
+                                  <v n="Fixed">true</v>
+                                </o>
+                                <o>
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                              </l2>
+                              <l2 n="InputItems" cet="BoxTreeOperand">
+                                <o>
+                                  <o n="Operand" t="Operand">
+                                    <v n="Operand">"iq_Piezo.xIdleMode"</v>
+                                    <v n="Type">"BOOL"</v>
+                                    <v n="Comment">""</v>
+                                    <v n="SymbolComment">""</v>
+                                    <v n="Address">""</v>
+                                    <o n="Flags" t="Flags">
+                                      <v n="Extensible">false</v>
+                                      <v n="Flags">0</v>
+                                      <v n="Fixed">false</v>
+                                    </o>
+                                    <v n="LValue">false</v>
+                                    <v n="Boolean">false</v>
+                                    <v n="IsInstance">false</v>
+                                    <v n="Id">15L</v>
+                                  </o>
+                                  <v n="Id">14L</v>
+                                </o>
+                                <o>
+                                  <o n="Operand" t="Operand">
+                                    <v n="Operand">"rtVoltMode.Q"</v>
+                                    <v n="Type">"BOOL"</v>
+                                    <v n="Comment">""</v>
+                                    <v n="SymbolComment">""</v>
+                                    <v n="Address">""</v>
+                                    <o n="Flags" t="Flags">
+                                      <v n="Extensible">false</v>
+                                      <v n="Flags">0</v>
+                                      <v n="Fixed">false</v>
+                                    </o>
+                                    <v n="LValue">false</v>
+                                    <v n="Boolean">false</v>
+                                    <v n="IsInstance">false</v>
+                                    <v n="Id">58L</v>
+                                  </o>
+                                  <v n="Id">57L</v>
+                                </o>
+                              </l2>
+                              <o n="InputParam" t="ParamList">
+                                <l2 n="Names" />
+                                <l2 n="Types" />
+                              </o>
+                              <o n="OutputParam" t="ParamList">
+                                <l2 n="Names" cet="String">
+                                  <v></v>
+                                </l2>
+                                <l2 n="Types" cet="String">
+                                  <v>BOOL</v>
+                                </l2>
+                              </o>
+                              <v n="CallType" t="Operator">Or</v>
+                              <v n="EN">false</v>
+                              <v n="ENO">false</v>
+                              <n n="STSnippet" />
+                              <v n="Id">56L</v>
+                            </o>
+                            <o t="BoxTreeOperand">
+                              <o n="Operand" t="Operand">
+                                <v n="Operand">""</v>
+                                <v n="Type">"E_CTRL_MODE"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">false</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">17L</v>
+                              </o>
+                              <v n="Id">16L</v>
+                            </o>
+                            <o t="BoxTreeOperand">
+                              <o n="Operand" t="Operand">
+                                <v n="Operand">""</v>
+                                <v n="Type">"BOOL"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">false</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">19L</v>
+                              </o>
+                              <v n="Id">18L</v>
+                            </o>
+                            <o t="BoxTreeOperand">
+                              <o n="Operand" t="Operand">
+                                <v n="Operand">"iq_Piezo.stPIParams"</v>
+                                <v n="Type">"ST_CTRL_PI_PARAMS"</v>
+                                <v n="Comment">""</v>
+                                <v n="SymbolComment">""</v>
+                                <v n="Address">""</v>
+                                <o n="Flags" t="Flags">
+                                  <v n="Extensible">false</v>
+                                  <v n="Flags">0</v>
+                                  <v n="Fixed">false</v>
+                                </o>
+                                <v n="LValue">false</v>
+                                <v n="Boolean">false</v>
+                                <v n="IsInstance">false</v>
+                                <v n="Id">21L</v>
+                              </o>
+                              <v n="Id">20L</v>
+                            </o>
+                          </l2>
+                          <o n="InputParam" t="ParamList">
+                            <l2 n="Names" cet="String">
+                              <v>fSetpointValue</v>
+                              <v>fActualValue</v>
+                              <v>fManSyncValue</v>
+                              <v>bSync</v>
+                              <v>eMode</v>
+                              <v>bHold</v>
+                              <v>stParams</v>
+                            </l2>
+                            <l2 n="Types" cet="String">
+                              <v>LREAL</v>
+                              <v>LREAL</v>
+                              <v>LREAL</v>
+                              <v>BOOL</v>
+                              <v>E_CTRL_MODE</v>
+                              <v>BOOL</v>
+                              <v>ST_CTRL_PI_PARAMS[REF]</v>
+                            </l2>
+                          </o>
+                          <o n="OutputParam" t="ParamList">
+                            <l2 n="Names" cet="String">
+                              <v>fOut</v>
+                              <v>bARWactive</v>
+                              <v>eState</v>
+                              <v>eErrorId</v>
+                              <v>bError</v>
+                            </l2>
+                            <l2 n="Types" cet="String">
+                              <v>LREAL</v>
+                              <v>BOOL</v>
+                              <v>E_CTRL_STATE</v>
+                              <v>E_CTRL_ERRORCODES</v>
+                              <v>BOOL</v>
+                            </l2>
+                          </o>
+                          <v n="CallType" t="Operator">FunctionBlock</v>
+                          <v n="EN">false</v>
+                          <v n="ENO">false</v>
+                          <n n="STSnippet" />
+                          <v n="Id">3L</v>
+                        </o>
+                        <v n="Id">54L</v>
+                      </o>
+                    </l2>
+                    <l2 n="Connectors" />
+                    <v n="Id">1L</v>
+                  </o>
+                </l2>
+                <v n="BranchCounter">0</v>
+                <v n="ValidIds">true</v>
+              </o>
+            </Data>
+            <TypeList>
+              <Type n="Boolean">System.Boolean</Type>
+              <Type n="BoxTreeAssign">{9873c309-1f09-4ebf-9078-42d8057ef11b}</Type>
+              <Type n="BoxTreeBox">{acfc6f68-8e3a-4af5-bf81-3dd512095a46}</Type>
+              <Type n="BoxTreeOperand">{9de7f100-1b87-424c-a62e-45b0cfc85ed2}</Type>
+              <Type n="Flags">{668066f2-6069-46b3-8962-8db8d13d7db2}</Type>
+              <Type n="Int32">System.Int32</Type>
+              <Type n="Int64">System.Int64</Type>
+              <Type n="Network">{d9a99d73-b633-47db-b876-a752acb25871}</Type>
+              <Type n="NWLImplementationObject">{25e509de-33d4-4447-93f8-c9e4ea381c8b}</Type>
+              <Type n="Operand">{c9b2f165-48a2-4a45-8326-3952d8a3d708}</Type>
+              <Type n="Operator">{bffb3c53-f105-4e85-aba2-e30df579d75f}</Type>
+              <Type n="OutputItemList">{f40d3e09-c02c-4522-a88c-dac23558cfc4}</Type>
+              <Type n="ParamList">{71496971-9e0c-4677-a832-b9583b571130}</Type>
+              <Type n="String">System.String</Type>
+            </TypeList>
+          </XmlArchive>
+        </NWL>
+      </Implementation>
+    </Action>
+    <LineIds Name="FB_PiezoControl">
+      <LineId Id="313" Count="0" />
+      <LineId Id="315" Count="0" />
+      <LineId Id="314" Count="0" />
+      <LineId Id="310" Count="2" />
+      <LineId Id="24" Count="3" />
+      <LineId Id="307" Count="0" />
+      <LineId Id="270" Count="0" />
+      <LineId Id="366" Count="0" />
+      <LineId Id="271" Count="0" />
+      <LineId Id="267" Count="0" />
+      <LineId Id="246" Count="0" />
+      <LineId Id="248" Count="0" />
+      <LineId Id="367" Count="0" />
+      <LineId Id="247" Count="0" />
+      <LineId Id="203" Count="0" />
+      <LineId Id="241" Count="1" />
+      <LineId Id="371" Count="0" />
+      <LineId Id="240" Count="0" />
+      <LineId Id="414" Count="0" />
+      <LineId Id="417" Count="1" />
+      <LineId Id="460" Count="1" />
+      <LineId Id="419" Count="0" />
+      <LineId Id="369" Count="0" />
+      <LineId Id="462" Count="0" />
+      <LineId Id="237" Count="0" />
+      <LineId Id="309" Count="0" />
+      <LineId Id="245" Count="0" />
+      <LineId Id="360" Count="1" />
+      <LineId Id="205" Count="0" />
+      <LineId Id="196" Count="0" />
+      <LineId Id="201" Count="0" />
+      <LineId Id="197" Count="0" />
+      <LineId Id="233" Count="0" />
+      <LineId Id="191" Count="1" />
+      <LineId Id="194" Count="1" />
+      <LineId Id="198" Count="2" />
+      <LineId Id="193" Count="0" />
+      <LineId Id="351" Count="0" />
+      <LineId Id="359" Count="0" />
+      <LineId Id="368" Count="0" />
+      <LineId Id="187" Count="0" />
+      <LineId Id="252" Count="0" />
+      <LineId Id="257" Count="1" />
+      <LineId Id="262" Count="1" />
+      <LineId Id="265" Count="1" />
+      <LineId Id="264" Count="0" />
+      <LineId Id="254" Count="0" />
+      <LineId Id="253" Count="0" />
+      <LineId Id="268" Count="1" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_PiezoControl.ACT_CheckLimits">
+      <LineId Id="1" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

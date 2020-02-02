@@ -1,0 +1,54 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="FB_LimitSwitchState" Id="{b146c65a-179b-42df-a7f1-51deda1fdf82}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_LimitSwitchState
+VAR_INPUT
+	diInputs	:	UDINT;
+END_VAR
+VAR_OUTPUT
+	xHiLS	:	BOOL;
+	xLoLS	:	BOOL;
+END_VAR
+VAR
+END_VAR
+VAR CONSTANT
+	cHighVal	:	UDINT := 16#00010002;
+	cLowVal		:	UDINT := 16#00020001;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* ElmoMC Limit State
+A. Wallace 2017-2-25
+
+Sets the high and low limit switch bools based on input status dint from ElmoMC Drives *)
+IF diInputs <> 0 THEN
+	xHiLS := TRUE;
+	xLoLS := TRUE;
+ELSE
+	xHiLS := FALSE;
+	xLoLS := FALSE;
+END_IF
+
+//Check for high limit bits
+IF (diInputs AND cHighVal) = cHighVal THEN
+	xHiLS := FALSE;
+END_IF
+//Check for low limit bits
+IF (diInputs AND cLowVal) = cLowVal THEN
+	xLoLS := FALSE;
+END_IF]]></ST>
+    </Implementation>
+    <LineIds Name="FB_LimitSwitchState">
+      <LineId Id="74" Count="2" />
+      <LineId Id="106" Count="1" />
+      <LineId Id="109" Count="0" />
+      <LineId Id="111" Count="2" />
+      <LineId Id="110" Count="0" />
+      <LineId Id="108" Count="0" />
+      <LineId Id="77" Count="2" />
+      <LineId Id="104" Count="0" />
+      <LineId Id="80" Count="3" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

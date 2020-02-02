@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <DUT Name="HOMS_GantryAxis" Id="{bdfafee7-3353-4ea9-af8a-13facbf47fd4}">
+    <Declaration><![CDATA[TYPE HOMS_GantryAxis EXTENDS ST_HOMSStepper :
+STRUCT
+	//Virtual limit switch derived from gantry difference
+	DecoupledPositiveEnable	:	BOOL;
+	DecoupledNegativeEnable	:	BOOL;
+	
+	//Axis center as defined in Axilon FAT, used for gantry difference calculation adjustment
+	cCenter	:	DINT := 0; 
+	
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

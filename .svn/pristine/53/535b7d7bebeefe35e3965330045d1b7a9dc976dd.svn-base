@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <DUT Name="HOMS_PitchMechanism" Id="{f1ae217f-ce17-4364-a1a8-cdcb23654a20}">
+    <Declaration><![CDATA[TYPE HOMS_PitchMechanism :
+STRUCT
+	Piezo	:	ST_PiezoAxis := (
+	UpperVoltage := 120,
+	LowerVoltage := -20);	//Piezo
+	Axis	:	ST_AbstractAxis; //Abstract pitch axis
+	Stepper	:	ST_HOMSStepper; //Pitch stepper axis
+	
+	ReqPosLimHi	:	LREAL;
+	ReqPosLimLo	:	LREAL;
+	
+	
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

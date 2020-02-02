@@ -1,0 +1,266 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="FB_PitchControl" Id="{5d7f0ff1-cf67-4bce-80fc-4e4ac0fd9e20}" SpecialFunc="None">
+    <Declaration><![CDATA[{attribute 'reflection'}
+FUNCTION_BLOCK FB_PitchControl
+VAR_IN_OUT
+	Pitch : HOMS_PitchMechanism;
+END_VAR
+VAR_INPUT
+	DirectPiezoMode	:	BOOL := FALSE; //Set this true to tell the piezo what position to seek in closed loop
+	rReqAbsPos	:	REAL; //Control the pitch position with this when DirectPiezoMode is false
+END_VAR
+VAR_OUTPUT
+	q_xError	:	BOOL;
+	q_xDone	:	BOOL;
+END_VAR
+VAR
+	//Introspection
+	//////////////////////////////
+		{attribute 'instance-path'}
+		{attribute 'no_init'}
+		POUName	:	STRING; //Name of the POU for logging/error reporting
+	
+	
+	//FB Boilerplate
+	//////////////////////
+		stDiag	:	ST_fbDiagnostics;
+		fbFormatString	:	FB_FormatString;
+		
+	//Working variables
+	/////////////////////////
+		PC_State : E_PitchControl := PCM_Init;
+		rPrevReqAbsPos	:	REAL; //Previously  requested abs position
+		rPrevStepperPos :	REAL; //Previously successfully achieved stepper position
+		tonStepperHold	:	TON := (PT := T#100ms); //Timer to hold stepper position while the system relaxes
+	
+		//PTP
+		/////////////////////////
+				Drive         : FB_DRIVE;
+				fbCoE         : FB_ElmoGDCBellCoE;
+				nCommand      : UINT;
+				bExecute      : BOOL;
+				
+				rLastSetpoint : REAL;
+				rtTweakFwd    : R_TRIG;
+				rtTweakBwd    : R_TRIG;
+				rtExecute     : R_TRIG;
+				bRequesting   : BOOL;
+				rSetpoint     : REAL; //Adjusted based on abs pos request or tweaks.
+	
+	//Axis Control Blocks
+	/////////////////////////////
+		fbPiezoControl	:	FB_PiezoControl;
+		fbPitchStepper   :   FB_PTP;
+	
+	
+	//Triggers
+	//////////////////////////////
+		rtManualMode	:	R_TRIG;
+		ftManualMode	:	F_TRIG;
+		rtStepperDone	:	R_TRIG;
+		rtStepperEnabled: 	R_TRIG;
+
+	lrActPos: LREAL;
+	
+	rtStepperErr: R_TRIG;
+END_VAR
+VAR CONSTANT
+	cPiezoRange	:	REAL := 0.09; //90um of stroke to the piezo
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* HOMS Pitch Control
+A. Wallace
+
+The HOMS Pitch mechanism consists of a stepper and piezo that work together to adjust
+the pitch of the mirror assembly.
+
+Pitch control state machine
+
+If the target position is beyond the range of the piezo mechanism,
+execute a coarse pitch move with the stepper. 
+The target of the coarse move shall be set to the requested position. 
+Once coarse motion has completed the coarse motion drive position 
+correction output shall be set to zero.
+
+Fine pitch motion with the piezo will be initiated to finish closing the loop.
+
+The piezo mechanism can actuate ~ 180urad or 90um.
+
+*)
+
+lrActPos := Pitch.Stepper.stAxis.NcToPlc.ActPos;
+nCommand  := 3;
+
+
+//Manual mode switching logic
+/////////////////////////////////////
+	rtManualMode(CLK:=DirectPiezoMode);
+	ftManualMode(CLK:=DirectPiezoMode);
+	A_ModeSwitch();
+
+//Motion control logic from PTP	
+//Tweak Triggers
+/////////////////////////////////////////////
+	rtTweakFwd(CLK:=Pitch.Axis.bTwkFwd);
+	rtTweakBwd(CLK:=Pitch.Axis.bTwkBwd);
+	rtExecute(CLK:=NOT Pitch.Stepper.stAxis.Status.NotMoving);
+//Tweak Forward
+/////////////////////
+IF rtTweakFwd.Q THEN
+	//Setup move
+	rSetpoint := rLastSetpoint + Pitch.Axis.rTweak;
+//Tweak Backwards
+/////////////////////
+ELSIF rtTweakBwd.Q THEN
+	//Setup move
+	rSetpoint := rLastSetpoint - Pitch.Axis.rTweak;
+//Setpoint change
+///////////////////////
+ELSIF Pitch.Axis.rReqAbsPos <> rPrevReqAbsPos THEN //AND NOT Drive.bBusy THEN
+	//Setup move
+	rSetpoint := LREAL_TO_REAL(Pitch.Axis.rReqAbsPos);
+	rPrevReqAbsPos := rSetpoint;
+ELSE
+	bRequesting := FALSE;
+END_IF
+
+//Soft Limits
+///////////////////////////
+rSetpoint := LIMIT(Pitch.ReqPosLimLo, rSetpoint, Pitch.ReqPosLimHi);
+
+IF DirectPiezoMode THEN
+	; //Use Pitch.Piezo.rReqAbsPos to command the piezo.
+ELSE
+	//We're not in direct piezo mode
+	//If the requested move is greater than the est. piezo range, we must engage the stepper.
+	IF rSetpoint <> rLastSetpoint THEN
+		(* Note: We use the previously achieved stepper position as the "center" of the range for the piezo, rather than
+			the current position. *)
+		IF WithinRange(ValA:=rSetpoint, Center:=rPrevStepperPos, Range:=cPiezoRange, Offset:=0) THEN
+			//Request is within range of the piezo, attempt to acheive it
+			Pitch.Piezo.rReqAbsPos := rSetpoint;
+		ELSE
+			//Request is out of range of the piezo
+			Pitch.Stepper.xEnable := TRUE;
+			Pitch.Stepper.rReqAbsolute := rSetpoint;
+			//Set the piezo to half-travel
+			Pitch.Piezo.xIdleMode := TRUE;
+		END_IF
+	//Store last request so we don't repeat
+	rLastSetpoint := rSetpoint;
+	END_IF
+
+END_IF
+
+(* Wait for the piezo to settle. *)
+
+(* Stepper has been enabled, confirm then execute stepper move *)
+rtStepperEnabled(CLK:=Pitch.Stepper.stStatus.bEnabled);
+IF rtStepperEnabled.Q THEN
+	bExecute := TRUE;
+	bRequesting := TRUE;
+END_IF
+
+(* Once the stepper is done moving, set the previously achieved setpoint and disable the stepper *)
+tonStepperHold(IN:=Pitch.Stepper.bDone);
+rtStepperErr(CLK:=Pitch.Stepper.stStatus.bError);
+
+IF tonStepperHold.Q OR rtStepperErr.Q THEN
+	Pitch.Stepper.xEnable := FALSE; //turn off the stepper
+	(* Might need to consider how long to hold with the stepper so the SOMS coupling can relax and the piezo can take over with full range... *)
+	rPrevStepperPos	:= rSetpoint; //using the requested position for now, assuming the done flag isn't set until within a reasonable deadband. Might use the actual settled position after.
+	Pitch.Piezo.xIdleMode := FALSE;
+	Pitch.Piezo.rReqAbsPos :=rSetpoint;
+END_IF
+
+//Transfer the other stuff to the piezo
+/////////////////////////////////////////
+Pitch.Piezo.rActPos := Pitch.Stepper.stAxis.NcToPlc.ActPos;
+
+//Function blocks
+ACT_PTP();
+
+
+fbPiezoControl(iq_Piezo:=Pitch.Piezo,
+	Enable_Positive:=Pitch.Stepper.xHiLS,
+	Enable_Negative:=Pitch.Stepper.xLoLS
+);
+]]></ST>
+    </Implementation>
+    <Action Name="A_ModeSwitch" Id="{aab9346d-393d-4f86-a5e3-e32335e00aef}">
+      <Implementation>
+        <ST><![CDATA[(* When switching between modes, we need to make sure all the executes/ mode switches, etc. are cleared *)
+
+// Automatic to manual
+/////////////////////////////
+IF rtManualMode.Q THEN
+;
+END_IF
+
+// Manual to automatic
+//////////////////////////////
+IF ftManualMode.Q THEN
+	;
+END_IF]]></ST>
+      </Implementation>
+    </Action>
+    <Action Name="ACT_PTP" Id="{e2c6c705-5c0c-46c2-b9a5-09517e0b3539}">
+      <Implementation>
+        <ST><![CDATA[//Read CoE Parameters
+/////////////////////////
+fbCoE(stCoE:=Pitch.Stepper.stCoE);
+
+//Give control of the axis to the Drive function block
+///////////////////////////////////////////////////////
+Drive(bEnable  := Pitch.Stepper.xEnable,
+	  Axis     := Pitch.Stepper.stAxis,
+	  nCommand := nCommand,
+	  bExecute := bExecute,
+	  fPosition     := rSetpoint,
+	  fAcceleration := Pitch.Stepper.fAcceleration,
+	  fDeceleration := Pitch.Stepper.fDeceleration,
+	  fVelocity     := Pitch.Stepper.fVelocity,
+	  bLimitFwd     := Pitch.Stepper.xHiLS,
+	  bLimitBwd     := Pitch.Stepper.xLoLS,
+	  bDone	=>  Pitch.Stepper.bDone,
+	  bBusy => Pitch.Stepper.bBusy,
+	  stStepperStatus => Pitch.Stepper.stStatus
+	  );
+
+//Reset Execute to wait for next motion command
+////////////////////////////////////////////////
+bExecute R= Drive.Status.NotMoving AND NOT bRequesting;
+
+
+
+]]></ST>
+      </Implementation>
+    </Action>
+    <LineIds Name="FB_PitchControl">
+      <LineId Id="1681" Count="85" />
+      <LineId Id="1859" Count="0" />
+      <LineId Id="1767" Count="6" />
+      <LineId Id="1862" Count="0" />
+      <LineId Id="1774" Count="21" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_PitchControl.A_ModeSwitch">
+      <LineId Id="2" Count="3" />
+      <LineId Id="9" Count="1" />
+      <LineId Id="8" Count="0" />
+      <LineId Id="6" Count="1" />
+      <LineId Id="11" Count="2" />
+      <LineId Id="1" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_PitchControl.ACT_PTP">
+      <LineId Id="2" Count="14" />
+      <LineId Id="30" Count="0" />
+      <LineId Id="32" Count="1" />
+      <LineId Id="17" Count="6" />
+      <LineId Id="25" Count="0" />
+      <LineId Id="27" Count="0" />
+      <LineId Id="1" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,59 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="FB_GantryDifferenceMonitor" Id="{eb93568c-1cf2-4297-a821-16651e2d7332}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_GantryDifferenceMonitor
+VAR_IN_OUT
+	Gantry	:	HOMS_Gantry;
+END_VAR
+VAR_INPUT
+END_VAR
+VAR_OUTPUT
+END_VAR
+VAR
+	// Original Axilon gantry difference refrence (considered 0 gantry difference for us)
+	AxilonGantryDiff: DINT := 0;
+	//Uncorrected gantry diff
+	HOMSGantryDiff:	DINT := 0;
+	EncScale : LREAL := gEncScale;
+END_VAR
+VAR CONSTANT
+	
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* Gantry Difference Monitor
+E. Rodriguez, A. Wallace 17-2-15
+
+The gantry difference monitor runs in a fast task and monitors
+the gantry difference between two gantried axes. If this difference
+exceeds the permitted amount, a gauntry fault boolean is set. 
+
+Axilon provided encoder counts for the "center" of each axis. We 
+consider this center to be the zero-gantry-difference position.
+
+This boolean is monitored by other function blocks that use the gantry structure, including
+but not limited to:
+Gantry control function block
+System error summary
+*)
+
+//1 encoder count = 1 nm
+//AxilonGantryDiff := Gantry.PAxis.cCenter - Gantry.SAxis.cCenter;
+
+//HOMSGantryDiff := Gantry.PAxis.diEncCnt - Gantry.SAxis.diEncCnt;
+
+Gantry.Diff := LREAL_TO_REAL(Gantry.PAxis.stAxis.NcToPlc.ActPos - Gantry.SAxis.stAxis.NcToPlc.ActPos);
+
+Gantry.DiffFlt S= ABS(Gantry.Diff) > Gantry.DiffTol;
+Gantry.DiffFlt R= ABS(Gantry.Diff) <= Gantry.DiffTol - Gantry.DiffHys;]]></ST>
+    </Implementation>
+    <LineIds Name="FB_GantryDifferenceMonitor">
+      <LineId Id="191" Count="4" />
+      <LineId Id="249" Count="2" />
+      <LineId Id="196" Count="7" />
+      <LineId Id="208" Count="5" />
+      <LineId Id="242" Count="0" />
+      <LineId Id="244" Count="0" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

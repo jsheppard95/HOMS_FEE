@@ -1,0 +1,55 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <DUT Name="ST_HOMSStepper" Id="{aef16f49-75ed-478e-b44e-7ca76d5a5702}">
+    <Declaration><![CDATA[TYPE ST_HOMSStepper :
+STRUCT
+//FoE
+sParamFilePath	:	T_MaxString := '\Hard Disk\WWW\FoePrmFlashImage_XML.xml';
+
+(* Controls *)
+/////////////////////////////////
+xEnable	:	BOOL;
+//External motor interlock, overrides axis enable
+i_xMotorInterlock	:	BOOL;
+//Motion Profile
+fVelocity     : REAL;
+fAcceleration : REAL;
+fDeceleration : REAL ;
+//Tweak Requests
+bTwkFwd : BOOL;
+bTwkBwd : BOOL;
+rTweak  : REAL;
+//Absolute Value Request
+rReqAbsolute : REAL:= 0.0;
+
+(* Status *)
+//Axis Status
+stStatus : ST_StepperStatus;
+bDone : BOOL;
+bBusy : BOOL;
+
+
+(* IO *)
+//CoE Stuff
+///////////////////////////////
+stCoE	:	ST_ElmoGDCBellCoEParams;
+
+//Drive inputs
+/////////////////////////////
+diInputs	AT %I*	:	DINT;
+//Drive current
+iDriveCurrent	AT %I*	:	INT;	
+(* Axis motor *)
+stAxis	:	AXIS_REF;
+//Limit switches
+xHiLS	:	BOOL;
+xLoLS	:	BOOL;
+//Raw encoder count
+//diEncCnt	AT %I*	:	DINT;
+
+
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>
